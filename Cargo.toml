@@ -1,0 +1,14 @@
+[package]
+name = "bytepair"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Huseen Munye"]
+description = """
+Byte-Pair Encoding (BPE) implementation from scratch, designed specifically for tokenization tasks 
+in NLP and text processing.
+"""
+repository = "https://github.com/hmunye/bytepair"
+readme = "README.md"
+
+[dependencies]
