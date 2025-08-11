@@ -4,3 +4,5 @@
 //! [Byte-Pair Encoding]: https://en.wikipedia.org/wiki/Byte-pair_encoding
 
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
+
+mod trie;

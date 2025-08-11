@@ -12,3 +12,4 @@ text encoding.
 
 ## References
 - [Byte-pair Encoding](https://en.wikipedia.org/wiki/Byte-pair_encoding)
+- [Trie](https://en.wikipedia.org/wiki/Trie)
