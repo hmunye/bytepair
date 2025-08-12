@@ -2,23 +2,23 @@ use std::mem;
 
 use crate::token_id_t;
 
-/// `Trie` for storing token IDs associated with token sequences.
+/// Trie for storing token IDs associated with token sequences.
 #[derive(Debug, Clone)]
 pub struct Trie {
-    /// `Trie` nodes.
+    /// Trie nodes.
     nodes: Vec<Node>,
     /// Temporary per-node edge lists to maintain child-node relationships
     /// during insertions.
     tmp_edges: Vec<Vec<Edge>>,
 }
 
-/// Flattened `Trie` optimized for efficient lookup of token IDs associated
+/// Flattened trie optimized for efficient lookup of token IDs associated
 /// with token sequences.
 ///
 /// Constructed using [Trie::flatten] after all insertions are complete.
 #[derive(Debug, Clone)]
 pub struct FlattenTrie {
-    /// `Trie` nodes.
+    /// Trie nodes.
     nodes: Vec<Node>,
     /// Contiguous edge list representing child-node relationships.
     edges: Vec<Edge>,
@@ -26,7 +26,7 @@ pub struct FlattenTrie {
 
 #[derive(Debug, Clone, Copy)]
 struct Node {
-    /// Index to the start of the node's edges in `FlattenTrie`.
+    /// Index to the start of the node's edges in [FlattenTrie].
     child_idx: usize,
     /// Total number of child edges.
     child_len: usize,
@@ -100,7 +100,7 @@ impl Trie {
     /// Consumes this `Trie`, flattening its temporary edge lists into a
     /// contiguous edge array.
     ///
-    /// Returns a `FlattenTrie`, optimized for token ID lookups.
+    /// Returns a [FlattenTrie], optimized for token ID lookups.
     ///
     /// # Notes
     ///
@@ -136,8 +136,8 @@ impl Default for Trie {
 
 impl FlattenTrie {
     /// Finds the length of the longest prefix of the token sequence present in
-    /// the `Trie`, along with the token ID associated with the terminal node,
-    /// if any exists.
+    /// the `FlattenTrie`, along with the token ID associated with the last
+    /// matched node, if any exists.
     pub fn longest_match(&self, seq: &[token_id_t]) -> (usize, Option<token_id_t>) {
         let mut matched_count = 0;
         let mut token_id = None;
