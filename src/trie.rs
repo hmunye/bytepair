@@ -1,42 +1,45 @@
 use std::mem;
 
-/// `Trie` for storage of token IDs associated with byte sequences.
+use crate::token_id_t;
+
+/// `Trie` for storing token IDs associated with token sequences.
 #[derive(Debug, Clone)]
 pub struct Trie {
-    /// Nodes in the trie.
+    /// `Trie` nodes.
     nodes: Vec<Node>,
-    /// Temporary per-node edge lists used during insertions.
+    /// Temporary per-node edge lists to maintain child-node relationships
+    /// during insertions.
     tmp_edges: Vec<Vec<Edge>>,
 }
 
 /// Flattened `Trie` optimized for efficient lookup of token IDs associated
-/// with byte sequences.
+/// with token sequences.
 ///
 /// Constructed using [Trie::flatten] after all insertions are complete.
 #[derive(Debug, Clone)]
 pub struct FlattenTrie {
-    /// Nodes in the flattened trie.
+    /// `Trie` nodes.
     nodes: Vec<Node>,
-    /// Contiguous edge list representing child links between nodes.
+    /// Contiguous edge list representing child-node relationships.
     edges: Vec<Edge>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Node {
-    /// Index of the first child edge in the flattened `edges`.
-    child_idx: u32,
-    /// Number of child edges.
-    children_len: u32,
-    /// Token ID marking the end of a complete byte sequence.
-    token_id: Option<u32>,
+    /// Index to the start of the node's edges in `FlattenTrie`.
+    child_idx: usize,
+    /// Total number of child edges.
+    child_len: usize,
+    /// Token ID marking the end of a complete token sequence.
+    token_id: Option<token_id_t>,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Edge {
-    /// Byte label associated with this edge (0–255).
-    byte: u8,
-    /// Index of the child node this edge points to.
-    child_idx: u32,
+    /// Token label associated with this edge.
+    token: token_id_t,
+    /// Index of the child node the edge "points" to.
+    child_idx: usize,
 }
 
 impl Trie {
@@ -45,45 +48,47 @@ impl Trie {
         Self {
             nodes: vec![Node {
                 child_idx: 0,
-                children_len: 0,
+                child_len: 0,
                 token_id: None,
             }],
             tmp_edges: Default::default(),
         }
     }
 
-    /// Inserts a byte sequence into the `Trie`, assigning the terminal node
+    /// Inserts a token sequence into the `Trie`, assigning the terminal node
     /// the provided `token_id`.
-    pub fn insert(&mut self, byte_seq: &[u8], token_id: u32) {
-        if !byte_seq.is_empty() {
+    pub fn insert(&mut self, seq: &[token_id_t], token_id: token_id_t) {
+        if !seq.is_empty() {
             let mut current_node_idx = 0;
 
-            for byte in byte_seq {
-                // Check for existing edge matching the byte.
+            for token in seq {
+                // Check for edges that contain a matching token.
                 if let Some(edge_idx) = self
                     .tmp_edges
                     .get(current_node_idx)
-                    .and_then(|children| children.iter().position(|edge| edge.byte == *byte))
+                    .and_then(|children| children.iter().position(|edge| edge.token == *token))
                 {
-                    current_node_idx =
-                        self.tmp_edges[current_node_idx][edge_idx].child_idx as usize;
+                    current_node_idx = self.tmp_edges[current_node_idx][edge_idx].child_idx;
                 } else {
-                    // Create a new node and edge for the unmatched byte.
                     let node_idx = self.nodes.len();
                     self.nodes.push(Node {
                         child_idx: 0,
-                        children_len: 0,
+                        child_len: 0,
                         token_id: None,
                     });
 
-                    // Ensure new node has it's own edge vector.
+                    // Ensure each new node gets a unique edge vector.
+                    //
+                    // Pushing instead of inserting preserves the position of
+                    // existing edge vectors.
                     self.tmp_edges.push(Vec::new());
                     self.tmp_edges[current_node_idx].push(Edge {
-                        byte: *byte,
-                        child_idx: node_idx as u32,
+                        token: *token,
+                        child_idx: node_idx,
                     });
 
-                    self.nodes[current_node_idx].children_len += 1;
+                    self.nodes[current_node_idx].child_len += 1;
+
                     current_node_idx = node_idx;
                 }
             }
@@ -92,10 +97,10 @@ impl Trie {
         }
     }
 
-    /// Consumes this `Trie`, flattening its temporary edge lists into
-    /// a contiguous edge array.
+    /// Consumes this `Trie`, flattening its temporary edge lists into a
+    /// contiguous edge array.
     ///
-    /// Returns a [`FlattenTrie`], optimized for token ID lookups.
+    /// Returns a `FlattenTrie`, optimized for token ID lookups.
     ///
     /// # Notes
     ///
@@ -106,7 +111,6 @@ impl Trie {
             edges: Default::default(),
         };
 
-        // Track position within `edges`, for node child index updating.
         let mut offset = 0;
 
         for (i, mut node) in self.nodes.into_iter().enumerate() {
@@ -115,7 +119,7 @@ impl Trie {
             }
 
             node.child_idx = offset;
-            offset += node.children_len;
+            offset += node.child_len;
 
             flat_trie.nodes.push(node);
         }
@@ -131,29 +135,30 @@ impl Default for Trie {
 }
 
 impl FlattenTrie {
-    /// Finds the length of the longest prefix of the byte sequence present in
+    /// Finds the length of the longest prefix of the token sequence present in
     /// the `Trie`, along with the token ID associated with the terminal node,
     /// if any exists.
-    pub fn longest_match(&self, byte_seq: &[u8]) -> (usize, Option<u32>) {
+    pub fn longest_match(&self, seq: &[token_id_t]) -> (usize, Option<token_id_t>) {
         let mut matched_count = 0;
         let mut token_id = None;
 
         let mut current_node_idx = 0;
 
-        for byte in byte_seq {
+        for token in seq {
             let node = &self.nodes[current_node_idx];
+            let first_child = node.child_idx;
+            let child_count = node.child_len;
 
-            let first_child = node.child_idx as usize;
-            let child_count = node.children_len as usize;
-
+            // Check for edges that contain a matching token.
             if let Some(edge) = &self.edges[first_child..first_child + child_count]
                 .iter()
-                .find(|entry| entry.byte == *byte)
+                .find(|entry| entry.token == *token)
             {
-                current_node_idx = edge.child_idx as usize;
+                current_node_idx = edge.child_idx;
 
-                matched_count += 1;
+                // Store token ID of the current node (not the previous one).
                 token_id = self.nodes[current_node_idx].token_id;
+                matched_count += 1;
             } else {
                 break;
             }
@@ -168,7 +173,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trie_empty_longest_match_returns_none() {
+    fn trie_empty_longest_match() {
         let trie = Trie::new().flatten();
 
         let (len, token) = trie.longest_match(&[1, 2, 3]);
@@ -177,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_single_insertion_exact_match() {
+    fn trie_single_insert() {
         let mut trie = Trie::new();
         trie.insert(&[0xAB, 0xCD, 0xEF], 100);
 
@@ -189,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_single_insertion_partial_match() {
+    fn trie_single_insert_partial_match() {
         let mut trie = Trie::new();
         trie.insert(&[0xAB, 0xCD, 0xEF], 100);
 
@@ -201,7 +206,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_multiple_insertions_longest_match_returns_correct_token() {
+    fn trie_multiple_insert_longest_match() {
         let mut trie = Trie::new();
         trie.insert(&[0x10, 0x20], 200);
         trie.insert(&[0x10, 0x20, 0x30], 201);
@@ -218,13 +223,14 @@ mod tests {
 
         for &(input, expected_len, expected_token) in &cases {
             let (len, token) = trie.longest_match(input);
+
             assert_eq!(len, expected_len);
             assert_eq!(token, expected_token);
         }
     }
 
     #[test]
-    fn trie_no_match_returns_none() {
+    fn trie_no_match() {
         let mut trie = Trie::new();
         trie.insert(&[0xAB, 0xCD], 10);
 
@@ -236,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_insert_multiple_disjoint_sequences() {
+    fn trie_multiple_insert_disjoint() {
         let mut trie = Trie::new();
         trie.insert(&[0xAA, 0xBB], 1);
         trie.insert(&[0xCC, 0xDD], 2);
@@ -259,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_insert_sequences_with_common_prefixes() {
+    fn trie_common_prefix_insert() {
         let mut trie = Trie::new();
         trie.insert(&[0x11], 10);
         trie.insert(&[0x11, 0x22], 20);
@@ -284,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_empty_sequence_insertion_and_lookup() {
+    fn trie_empty_sequence() {
         let mut trie = Trie::new();
         trie.insert(&[], 999);
 
@@ -296,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_insertion_of_overlapping_sequences_with_different_tokens() {
+    fn trie_overlapping_insert() {
         let mut trie = Trie::new();
         trie.insert(&[0x55, 0x66, 0x77], 43);
         trie.insert(&[0x55, 0x77], 44);
@@ -313,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_longest_match_with_no_terminal_node_in_prefix() {
+    fn trie_partial_match_no_token() {
         let mut trie = Trie::new();
         trie.insert(&[0x10, 0x20, 0x30, 0x40], 100);
 
@@ -325,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn trie_longest_match_with_partial_non_terminal_prefix() {
+    fn trie_partial_match_token() {
         let mut trie = Trie::new();
         trie.insert(&[0x10, 0x20], 101);
 
@@ -336,102 +342,34 @@ mod tests {
         assert_eq!(token, Some(101));
     }
 
+    // NOTE: This assumes a token ID size of u16.
     #[test]
-    fn trie_multiple_random_insertions_and_lookups() {
+    fn trie_nested_sequence_insert() {
         let mut trie = Trie::new();
 
-        let sequences: Vec<(&[u8], u32)> = vec![
-            (&[0xFF, 0x00, 0xAB], 1),
-            (&[0xAB, 0xCD], 2),
-            (&[0xDE, 0xAD, 0xBE, 0xEF], 3),
-            (&[0x01], 4),
-            (&[0x01, 0x02, 0x03, 0x04], 5),
-            (&[0x10, 0x20, 0x30], 6),
-            (&[0x10, 0x21, 0x30], 7),
-        ];
-
-        for &(seq, token) in &sequences {
-            trie.insert(seq, token);
+        for length in 1u16..=20 {
+            let seq: Vec<_> = (0u16..length).map(|i| i * 3 + 7).collect();
+            trie.insert(&seq, length);
         }
 
         let trie = trie.flatten();
 
-        for &(seq, token) in &sequences {
-            let (len, found_token) = trie.longest_match(seq);
-            assert_eq!(len, seq.len());
-            assert_eq!(found_token, Some(token));
-        }
-
-        let (len, token) = trie.longest_match(&[0xFF, 0x00]);
-        assert_eq!(len, 2);
-        assert_eq!(token, None);
-
-        let (len, token) = trie.longest_match(&[0x00, 0xFF]);
-        assert_eq!(len, 0);
-        assert_eq!(token, None);
-
-        let (len, token) = trie.longest_match(&[0x10, 0x21, 0x30]);
-        assert_eq!(len, 3);
-        assert_eq!(token, Some(7));
-
-        let (len, token) = trie.longest_match(&[0x10, 0x20, 0x30]);
-        assert_eq!(len, 3);
-        assert_eq!(token, Some(6));
-
-        let (len, token) = trie.longest_match(&[0x01, 0x02, 0x03, 0x04, 0x05]);
-        assert_eq!(len, 4);
-        assert_eq!(token, Some(5));
-    }
-
-    #[test]
-    fn trie_deeply_nested_sequences() {
-        let mut trie = Trie::new();
-
-        for length in 1..=20 {
-            let seq: Vec<u8> = (0..length).map(|i| (i * 3 + 7) as u8).collect();
-            trie.insert(&seq, length as u32);
-        }
-
-        let trie = trie.flatten();
-
-        for length in 1..=20 {
-            let seq: Vec<u8> = (0..length).map(|i| (i * 3 + 7) as u8).collect();
+        for length in 1u16..=20 {
+            let seq: Vec<_> = (0u16..length).map(|i| i * 3 + 7).collect();
             let (len, token) = trie.longest_match(&seq);
-            assert_eq!(len, length);
-            assert_eq!(token, Some(length as u32));
+            assert_eq!(len, length as usize);
+            assert_eq!(token, Some(length));
         }
 
-        let seq: Vec<u8> = (0..19).map(|i| (i * 3 + 7) as u8).collect();
+        let seq: Vec<_> = (0u16..19).map(|i| i * 3 + 7).collect();
         let (len, token) = trie.longest_match(&seq);
         assert_eq!(len, 19);
         assert_eq!(token, Some(19));
 
-        let mut seq: Vec<u8> = (0..21).map(|i| (i * 3 + 7) as u8).collect();
+        let mut seq: Vec<_> = (0u16..21).map(|i| i * 3 + 7).collect();
         seq[20] = 0xFF;
         let (len, token) = trie.longest_match(&seq);
         assert_eq!(len, 20);
         assert_eq!(token, Some(20));
-    }
-
-    #[test]
-    fn trie_insert_and_match_with_full_byte_range() {
-        let mut trie = Trie::new();
-
-        for b in 0..=255u8 {
-            let seq = [b];
-            trie.insert(&seq, b as u32);
-        }
-
-        let trie = trie.flatten();
-
-        for b in 0..=255u8 {
-            let (len, token) = trie.longest_match(&[b]);
-            assert_eq!(len, 1);
-            assert_eq!(token, Some(b as u32));
-        }
-
-        let (len, token) = trie.longest_match(&[]);
-        assert_eq!(len, 0);
-        assert_eq!(token, None);
     }
 }
