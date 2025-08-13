@@ -7,7 +7,7 @@
 
 mod trie;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Write;
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, BufWriter, Write as IoWrite};
@@ -20,9 +20,12 @@ use trie::{FlattenTrie, Trie};
 #[allow(non_camel_case_types)]
 pub type token_id_t = u16;
 
-/// The maximum vocabulary size, considering token ID size and initial
-/// single-byte tokens.
-const MAX_VOCAB_SIZE: token_id_t = token_id_t::MAX - 256;
+/// The maximum vocabulary size, considering token ID size, initial single-byte
+/// tokens, and special tokens.
+const MAX_VOCAB_SIZE: token_id_t = token_id_t::MAX - (256 + SPECIAL_TOKENS.len()) as token_id_t;
+
+/// Used to provide structure and additional context for the model's learning.
+const SPECIAL_TOKENS: [&str; 1] = ["<|eos|>"];
 
 /// A byte-level [BPE] tokenizer, used to build a vocabulary of subword units
 /// from a raw corpus.
@@ -33,6 +36,30 @@ const MAX_VOCAB_SIZE: token_id_t = token_id_t::MAX - 256;
 /// combinations of subwords.
 ///
 /// [BPE]: https://en.wikipedia.org/wiki/Byte-pair_encoding
+///
+/// # Example
+///
+/// ```no_run
+/// use bytepair::{token_id_t, Tokenizer};
+///
+/// fn main() -> std::io::Result<()> {
+///     let raw_text = std::fs::read_to_string("the_verdict.txt")?;
+///
+///     // Option 1: Load the tokenizer from a file containing merge rules.
+///     let tokenizer = Tokenizer::load("merges.txt")?;
+///
+///     // Option 2: Build a tokenizer directly from the raw text.
+///     // let tokenizer = Tokenizer::new(&raw_text)?;
+///
+///     // Encode the raw text into token IDs.
+///     let encoded: Vec<token_id_t> = tokenizer.encode(&raw_text);
+///
+///     // Decode the token IDs back into it's string representation.
+///     let decoded: String = tokenizer.decode(&encoded);
+///
+///     Ok(())
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Tokenizer {
     /// Stores the vocabulary in a [FlattenTrie] for efficient text encoding.
@@ -72,6 +99,8 @@ impl Tokenizer {
         // units.
         for i in 0x00..=0xFF {
             let token = i as token_id_t;
+
+            // Can be inserted as is.
             encoder.insert(&[token], token);
             decoder.push(vec![token]);
         }
@@ -98,7 +127,7 @@ impl Tokenizer {
         // combined into a new, larger token. They capture the order and
         // content of merges, allowing the vocabulary to be rebuilt from
         // scratch.
-        let mut merge_rules: Vec<(token_id_t, token_id_t)> = Vec::new();
+        let mut merge_rules: VecDeque<(token_id_t, token_id_t)> = Default::default();
 
         // NOTE: This assumes a token ID size of u16.
         let mut freq_map: HashMap<u32, u32> = Default::default();
@@ -127,14 +156,27 @@ impl Tokenizer {
             let tok_2 = (pair & 0xFFFF) as token_id_t;
 
             // Update the merge rules.
-            merge_rules.push((tok_1, tok_2));
+            merge_rules.push_back((tok_1, tok_2));
 
             // The new ID is based on the decoder length, incrementing from 256
             // after the initial single-byte tokens are inserted.
             let new_token_id = decoder.len() as token_id_t;
 
-            encoder.insert(&[tok_1, tok_2], new_token_id);
-            decoder.push(vec![tok_1, tok_2]);
+            // Since tokens can themselves be nested merges, the fully expanded
+            // token sequences of the token pair should be inserted into the
+            // encoder, so it can correctly greedily match the longest possible
+            // sequences when encoding new text.
+            //
+            // Storing longer token chains maximizes the efficiency of the
+            // greedy searching.
+            let mut merged_seq =
+                Vec::with_capacity(decoder[tok_1 as usize].len() + decoder[tok_2 as usize].len());
+
+            merged_seq.extend_from_slice(&decoder[tok_1 as usize]);
+            merged_seq.extend_from_slice(&decoder[tok_2 as usize]);
+
+            decoder.push(merged_seq);
+            encoder.insert(&decoder[new_token_id as usize], new_token_id);
 
             // TODO: Could probably be improved.
             //
@@ -159,6 +201,21 @@ impl Tokenizer {
         // reproducible, distributable, and consistent, while preserving
         // training history.
         serialize_rules(merge_rules)?;
+
+        // Insert special tokens to the encoder and decoder.
+        for token in SPECIAL_TOKENS {
+            let seq: Vec<_> = token
+                .as_bytes()
+                .iter()
+                .map(|byte| *byte as token_id_t)
+                .collect();
+
+            let new_token_id = decoder.len() as token_id_t;
+
+            // Can be inserted as is.
+            encoder.insert(&seq, new_token_id);
+            decoder.push(seq);
+        }
 
         Ok(Self {
             encoder: encoder.flatten(),
@@ -204,8 +261,22 @@ impl Tokenizer {
 
                 let new_token_id = decoder.len() as token_id_t;
 
-                encoder.insert(&[tok_1, tok_2], new_token_id);
-                decoder.push(vec![tok_1, tok_2]);
+                // Since tokens can themselves be nested merges, the fully expanded
+                // token sequences of the token pair should be inserted into the
+                // encoder, so it can correctly greedily match the longest possible
+                // sequences when encoding new text.
+                //
+                // Storing longer token chains maximizes the efficiency of the
+                // greedy searching.
+                let mut merged_seq = Vec::with_capacity(
+                    decoder[tok_1 as usize].len() + decoder[tok_2 as usize].len(),
+                );
+
+                merged_seq.extend_from_slice(&decoder[tok_1 as usize]);
+                merged_seq.extend_from_slice(&decoder[tok_2 as usize]);
+
+                decoder.push(merged_seq);
+                encoder.insert(&decoder[new_token_id as usize], new_token_id);
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -217,6 +288,20 @@ impl Tokenizer {
             line.clear();
         }
 
+        // Append special tokens to the encoder and decoder.
+        for token in SPECIAL_TOKENS {
+            let seq: Vec<_> = token
+                .as_bytes()
+                .iter()
+                .map(|byte| *byte as token_id_t)
+                .collect();
+
+            let new_token_id = decoder.len() as token_id_t;
+
+            encoder.insert(&seq, new_token_id);
+            decoder.push(seq);
+        }
+
         Ok(Self {
             encoder: encoder.flatten(),
             decoder,
@@ -225,27 +310,37 @@ impl Tokenizer {
 
     /// Encodes the provided text segment into a token ID sequence.
     pub fn encode(&self, input: &str) -> Vec<token_id_t> {
-        // Convert the input to bytes, then map them to a sequence of token
-        // IDs.
-        let input_seq: Vec<_> = input
-            .as_bytes()
-            .iter()
-            .map(|byte| *byte as token_id_t)
-            .collect();
-
         let mut encoded = Vec::new();
-        let mut pos = 0;
 
-        while pos < input_seq.len() {
-            let (match_len, maybe_token_id) = self.encoder.longest_match(&input_seq[pos..]);
+        // Split input on whitespace so merges within word boundaries can be
+        // captured.
+        //
+        // Encoding the entire input at once breaks the boundaries leading to
+        // missed merges and smaller tokens being pushed, leading to a larger
+        // encoded sequence.
+        for word in input.split_whitespace() {
+            // Convert the word to bytes, then map them to a sequence of token
+            // IDs.
+            let word_seq: Vec<_> = word
+                .as_bytes()
+                .iter()
+                .map(|byte| *byte as token_id_t)
+                .collect();
 
-            if let Some(token_id) = maybe_token_id {
-                encoded.push(token_id);
-                pos += match_len;
-            } else {
-                // No matching token ID found, so insert the token as is.
-                encoded.push(input_seq[pos]);
-                pos += 1;
+            let mut pos = 0;
+
+            while pos < word_seq.len() {
+                let (match_len, maybe_token_id) = self.encoder.longest_match(&word_seq[pos..]);
+
+                if let Some(token_id) = maybe_token_id {
+                    encoded.push(token_id);
+                    pos += match_len;
+                } else {
+                    // No matching token sequence found, so insert the token as
+                    // is.
+                    encoded.push(word_seq[pos]);
+                    pos += 1;
+                }
             }
         }
 
@@ -274,13 +369,13 @@ impl Tokenizer {
 /// The merges are stored in the following format:
 ///
 /// ```text
-/// t h
-/// h e
-/// th e
+/// 100 130
+/// 324 443
+/// 1080 327
 /// ```
 ///
 /// Each line represents a token pair to merge next.
-fn serialize_rules(mut merge_rules: Vec<(token_id_t, token_id_t)>) -> io::Result<()> {
+fn serialize_rules(mut merge_rules: VecDeque<(token_id_t, token_id_t)>) -> io::Result<()> {
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -289,7 +384,7 @@ fn serialize_rules(mut merge_rules: Vec<(token_id_t, token_id_t)>) -> io::Result
     let mut writer = BufWriter::new(file);
     let mut line = String::new();
 
-    while let Some((tok_1, tok_2)) = merge_rules.pop() {
+    while let Some((tok_1, tok_2)) = merge_rules.pop_front() {
         write!(&mut line, "{tok_1} {tok_2}")
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
