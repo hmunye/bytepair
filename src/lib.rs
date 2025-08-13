@@ -86,8 +86,8 @@ impl Tokenizer {
         // of the given input.
         let mut encoder: Trie = Default::default();
 
-        // Used for decoding, allowing quick indexing of token sequences via
-        // token ID.
+        // Used for efficient decoding, allowing for the indexing of token
+        // sequences via token ID.
         let mut decoder: Vec<Vec<token_id_t>> = Default::default();
 
         // Initialize the encoder and decoder with all single-byte tokens
@@ -105,21 +105,16 @@ impl Tokenizer {
             decoder.push(vec![token]);
         }
 
-        // Split the corpus on whitespace, convert each word to byte slices,
-        // and then map each byte slice to an owned token sequence.
+        // The training corpus is kept as a flat token vector to allow BPE to
+        // learn merges across whitespace and word boundaries, improving
+        // tokenization and compression.
         //
-        // Splitting by whitespace ensures byte frequencies are learned within
-        // words, not across word boundaries. Also, since BPE merges frequent
-        // byte sequences into subwords, each element must be able to represent
-        // both base bytes and token IDs.
+        // BPE merges frequent byte sequences into subwords, so each element
+        // must also represent both base bytes and token IDs.
         let mut training_corpus: Vec<_> = corpus
-            .split_whitespace()
-            .map(|word| {
-                word.as_bytes()
-                    .iter()
-                    .map(|byte| *byte as token_id_t)
-                    .collect()
-            })
+            .as_bytes()
+            .iter()
+            .map(|byte| *byte as token_id_t)
             .collect();
 
         // Merge rules are sequences of instructions produced during the BPE
@@ -164,11 +159,8 @@ impl Tokenizer {
 
             // Since tokens can themselves be nested merges, the fully expanded
             // token sequences of the token pair should be inserted into the
-            // encoder, so it can correctly greedily match the longest possible
-            // sequences when encoding new text.
-            //
-            // Storing longer token chains maximizes the efficiency of the
-            // greedy searching.
+            // encoder, so it can greedily match the longest possible sequences
+            // when encoding new text.
             let mut merged_seq =
                 Vec::with_capacity(decoder[tok_1 as usize].len() + decoder[tok_2 as usize].len());
 
@@ -183,16 +175,15 @@ impl Tokenizer {
             // Replace occurrences of the most frequent pair in the training
             // corpus with the newly assigned token ID, enabling the discovery
             // and merging of new pairs involving merged tokens.
-            for word in training_corpus.iter_mut() {
-                let mut i = 0;
+            let mut i = 0;
+            while i < training_corpus.len() - 1 {
+                let tokens = &mut training_corpus[i..i + 2];
 
-                while i + 1 < word.len() {
-                    if (word[i], word[i + 1]) == (tok_1, tok_2) {
-                        word[i] = new_token_id;
-                        word.remove(i + 1);
-                    } else {
-                        i += 1;
-                    }
+                if (tokens[0], tokens[1]) == (tok_1, tok_2) {
+                    tokens[0] = new_token_id;
+                    training_corpus.remove(i + 1);
+                } else {
+                    i += 1;
                 }
             }
         }
@@ -237,6 +228,8 @@ impl Tokenizer {
         // (0x00..=0xFF).
         for i in 0x00..=0xFF {
             let token = i as token_id_t;
+
+            // Can be inserted as is.
             encoder.insert(&[token], token);
             decoder.push(vec![token]);
         }
@@ -261,13 +254,10 @@ impl Tokenizer {
 
                 let new_token_id = decoder.len() as token_id_t;
 
-                // Since tokens can themselves be nested merges, the fully expanded
-                // token sequences of the token pair should be inserted into the
-                // encoder, so it can correctly greedily match the longest possible
-                // sequences when encoding new text.
-                //
-                // Storing longer token chains maximizes the efficiency of the
-                // greedy searching.
+                // Since tokens can themselves be nested merges, the fully
+                // expanded token sequences of the token pair should be
+                // inserted into the encoder, so it can greedily match the
+                // longest possible sequences when encoding new text.
                 let mut merged_seq = Vec::with_capacity(
                     decoder[tok_1 as usize].len() + decoder[tok_2 as usize].len(),
                 );
@@ -298,6 +288,7 @@ impl Tokenizer {
 
             let new_token_id = decoder.len() as token_id_t;
 
+            // Can be inserted as is.
             encoder.insert(&seq, new_token_id);
             decoder.push(seq);
         }
@@ -312,35 +303,27 @@ impl Tokenizer {
     pub fn encode(&self, input: &str) -> Vec<token_id_t> {
         let mut encoded = Vec::new();
 
-        // Split input on whitespace so merges within word boundaries can be
-        // captured.
-        //
-        // Encoding the entire input at once breaks the boundaries leading to
-        // missed merges and smaller tokens being pushed, leading to a larger
-        // encoded sequence.
-        for word in input.split_whitespace() {
-            // Convert the word to bytes, then map them to a sequence of token
-            // IDs.
-            let word_seq: Vec<_> = word
-                .as_bytes()
-                .iter()
-                .map(|byte| *byte as token_id_t)
-                .collect();
+        // New text segments are encoded as flat token vectors, preserving
+        // whitespace for better compression by capturing more merges than if
+        // split by spaces.
+        let input_seq: Vec<_> = input
+            .as_bytes()
+            .iter()
+            .map(|&byte| byte as token_id_t)
+            .collect();
 
-            let mut pos = 0;
+        let mut pos = 0;
 
-            while pos < word_seq.len() {
-                let (match_len, maybe_token_id) = self.encoder.longest_match(&word_seq[pos..]);
+        while pos < input_seq.len() {
+            let (match_len, maybe_token_id) = self.encoder.longest_match(&input_seq[pos..]);
 
-                if let Some(token_id) = maybe_token_id {
-                    encoded.push(token_id);
-                    pos += match_len;
-                } else {
-                    // No matching token sequence found, so insert the token as
-                    // is.
-                    encoded.push(word_seq[pos]);
-                    pos += 1;
-                }
+            if let Some(token_id) = maybe_token_id {
+                encoded.push(token_id);
+                pos += match_len;
+            } else {
+                // No matching token sequence found, so insert the token as is.
+                encoded.push(input_seq[pos]);
+                pos += 1;
             }
         }
 
@@ -416,18 +399,16 @@ fn decode_token(token_id: token_id_t, decoder: &[Vec<token_id_t>], output: &mut 
 /// # Notes
 ///
 /// Clears the provided `HashMap` before counting.
-fn count_pair_freqs(input: &[Vec<token_id_t>], freq_map: &mut HashMap<u32, u32>) {
+fn count_pair_freqs(input: &[token_id_t], freq_map: &mut HashMap<u32, u32>) {
     // Reset the frequency map before counting.
     freq_map.clear();
 
-    for word in input {
-        for tokens in word.windows(2) {
-            // NOTE: This assumes a token ID size of u16.
-            //
-            // The first token occupies the higher 16 bits, the second token
-            // occupies the lower 16 bits.
-            let key = (tokens[0] as u32) << 16 | tokens[1] as u32;
-            *freq_map.entry(key).or_insert(0) += 1;
-        }
+    for tokens in input.windows(2) {
+        // NOTE: This assumes a token ID size of u16.
+        //
+        // The first token occupies the higher 16 bits, the second token
+        // occupies the lower 16 bits.
+        let key = (tokens[0] as u32) << 16 | tokens[1] as u32;
+        *freq_map.entry(key).or_insert(0) += 1;
     }
 }
